@@ -1,7 +1,10 @@
 {
     "domain": "eg4_battery",
     "name": "EG4 Battery",
-    "codeowners": [],
+    "codeowners": [
+        "@k3vmcd"
+    ],
+    "issue_tracker": "https://github.com/k3vmcd/ha-eg4-battery/issues",
     "dependencies": ["bluetooth"],
     "documentation": "",
     "iot_class": "local_polling",
