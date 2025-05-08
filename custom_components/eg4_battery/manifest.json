@@ -4,6 +4,7 @@
     "codeowners": [
         "@k3vmcd"
     ],
+    "documentation": "https://github.com/k3vmcd/ha-eg4-battery",
     "issue_tracker": "https://github.com/k3vmcd/ha-eg4-battery/issues",
     "dependencies": ["bluetooth"],
     "documentation": "",
