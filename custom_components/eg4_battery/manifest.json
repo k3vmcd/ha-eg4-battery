@@ -1,17 +1,17 @@
 {
     "domain": "eg4_battery",
     "name": "EG4 Battery",
+    "bluetooth": [
+        {"service_uuid": "00001000-0000-1000-8000-00805f9b34fb"}
+    ],
     "codeowners": [
         "@k3vmcd"
     ],
-    "documentation": "https://github.com/k3vmcd/ha-eg4-battery",
-    "issue_tracker": "https://github.com/k3vmcd/ha-eg4-battery/issues",
-    "dependencies": ["bluetooth"],
-    "iot_class": "local_polling",
-    "requirements": ["bleak>=0.21.0"],
-    "version": "0.1.0",
     "config_flow": true,
-    "bluetooth": [
-        {"service_uuid": "00001000-0000-1000-8000-00805f9b34fb"}
-    ]
+    "dependencies": ["bluetooth"],
+    "documentation": "https://github.com/k3vmcd/ha-eg4-battery",
+    "iot_class": "local_polling",
+    "issue_tracker": "https://github.com/k3vmcd/ha-eg4-battery/issues",
+    "requirements": ["bleak>=0.21.0"],
+    "version": "0.1.0"
 }
