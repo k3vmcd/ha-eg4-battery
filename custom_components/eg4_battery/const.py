@@ -21,7 +21,7 @@ TEMP_CELL1 = TEMP_OFFSET + 2  # Cell 1 temp 2 bytes later
 TEMP_CELL2 = TEMP_OFFSET + 4  # Cell 2 temp 4 bytes later
 
 # Status bit masks
-STATUS_CHARGING = 0x0001
-STATUS_DISCHARGING = 0x0002
-STATUS_BALANCING = 0x0004
-STATUS_PROTECTION = 0x0898    # Various protection flags
+STATUS_CHARGING = 0x0001      # Charging bit
+STATUS_DISCHARGING = 0x0002   # Discharging bit
+STATUS_BALANCING = 0x0004     # Balancing bit
+STATUS_PROTECTION = 0xFFF8    # All protection bits

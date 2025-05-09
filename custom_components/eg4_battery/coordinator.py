@@ -207,7 +207,7 @@ def parse_battery_data(response: bytes, device_name: str = None, device_address:
     data = {}
     try:
         if len(response) >= 85:
-            # Add device identification with BLE name and MAC address
+            # Add device identification
             data["device_info"] = {
                 "identifiers": {("eg4_battery", device_address)},
                 "name": f"EG4 Battery {device_name}",
@@ -229,11 +229,11 @@ def parse_battery_data(response: bytes, device_name: str = None, device_address:
             # Total voltage (÷100)
             data["total_voltage"] = registers[REGISTER_TOTAL_VOLTAGE] / 100.0
             
-            # Current (÷100, signed)
+            # Current (÷10, signed)
             current = registers[REGISTER_CURRENT]
-            if current > 32767:
-                current -= 65536
-            data["current"] = current / 100.0
+            if current & 0x8000:  # Check sign bit
+                current = -((~current + 1) & 0xFFFF)  # Two's complement conversion
+            data["current"] = current / 10.0
             
             # Cell voltages (÷1000)
             for i in range(4):
@@ -245,87 +245,83 @@ def parse_battery_data(response: bytes, device_name: str = None, device_address:
             data["cell_voltage_max"] = max(cell_voltages)
             data["cell_voltage_diff"] = round(data["cell_voltage_max"] - data["cell_voltage_min"], 3)
             
-            # --- Temperature Parsing (2-byte big-endian values, fallback to None) ---
-            temp_block_start = None
-            for i in range(30, len(response) - 7):
-                if response[i+6] == 0x0f and response[i+7] == 0xa0:
-                    temp_block_start = i
-                    break
-            if temp_block_start is not None:
-                pcb_temp_c = int.from_bytes(response[temp_block_start:temp_block_start+2], "big")
-                cell_temp_1_c = int.from_bytes(response[temp_block_start+2:temp_block_start+4], "big")
-                cell_temp_2_c = int.from_bytes(response[temp_block_start+4:temp_block_start+6], "big")
+            # Temperature parsing from registers, ignore out-of-range values
+            def safe_temp(val):
+                if val is None or val > 200 or val < -40:
+                    return None
+                return val
+            pcb_temp_c = safe_temp(registers[REGISTER_TEMPERATURE])
+            cell_temp_1_c = safe_temp(registers[REGISTER_TEMPERATURE + 1])
+            cell_temp_2_c = safe_temp(registers[REGISTER_TEMPERATURE + 2])
+            if temp_unit.upper() == "F":
+                data["pcb_temp"] = round(pcb_temp_c * 9/5 + 32, 1) if pcb_temp_c is not None else None
+                data["cell_temp_1"] = round(cell_temp_1_c * 9/5 + 32, 1) if cell_temp_1_c is not None else None
+                data["cell_temp_2"] = round(cell_temp_2_c * 9/5 + 32, 1) if cell_temp_2_c is not None else None
             else:
-                _LOGGER.error("Temperature block not found in response.")
-                pcb_temp_c = cell_temp_1_c = cell_temp_2_c = None
-
-            if pcb_temp_c is not None:
-                if temp_unit.upper() == "F":
-                    data["pcb_temp"] = round(pcb_temp_c * 9/5 + 32, 1)
-                    data["cell_temp_1"] = round(cell_temp_1_c * 9/5 + 32, 1)
-                    data["cell_temp_2"] = round(cell_temp_2_c * 9/5 + 32, 1)
-                else:
-                    data["pcb_temp"] = round(pcb_temp_c, 1)
-                    data["cell_temp_1"] = round(cell_temp_1_c, 1)
-                    data["cell_temp_2"] = round(cell_temp_2_c, 1)
-            else:
-                data["pcb_temp"] = None
-                data["cell_temp_1"] = None
-                data["cell_temp_2"] = None
+                data["pcb_temp"] = round(pcb_temp_c, 1) if pcb_temp_c is not None else None
+                data["cell_temp_1"] = round(cell_temp_1_c, 1) if cell_temp_1_c is not None else None
+                data["cell_temp_2"] = round(cell_temp_2_c, 1) if cell_temp_2_c is not None else None
             data["temp_unit"] = temp_unit.upper()
 
-            # --- Battery Percentage Parsing (marker-based, wombatt-main style) ---
+            # Battery percentage (SoC) from marker 0x0898
             soc = None
-            for i in range(35, len(response) - 4):
+            for i in range(len(response) - 6):
                 if response[i] == 0x08 and response[i+1] == 0x98:
-                    soc = response[i+3]
+                    soc = (response[i+4] << 8) | response[i+5]  # Use the second value after marker
                     break
             if soc is not None:
+                if soc > 100:
+                    soc = 100
                 data["battery_pct"] = soc
             else:
-                _LOGGER.error("Battery percentage (SoC) marker not found in response.")
                 data["battery_pct"] = None
             
-            # --- State and Protection Reason Parsing ---
+            # State detection
             status = registers[REGISTER_STATUS]
-            # Protection bits (example, adjust as needed for your BMS)
             protection_reasons = []
-            if status & 0x0008:
-                protection_reasons.append("COV")  # Cell Over Voltage
-            if status & 0x0010:
-                protection_reasons.append("CUV")  # Cell Under Voltage
-            if status & 0x0020:
-                protection_reasons.append("POV")  # Pack Over Voltage
-            if status & 0x0040:
-                protection_reasons.append("PUV")  # Pack Under Voltage
-            if status & 0x0080:
-                protection_reasons.append("CHG_OT")  # Charge Over Temp
-            if status & 0x0100:
-                protection_reasons.append("CHG_UT")  # Charge Under Temp
-            if status & 0x0200:
-                protection_reasons.append("DSG_OT")  # Discharge Over Temp
-            if status & 0x0400:
-                protection_reasons.append("DSG_UT")  # Discharge Under Temp
-            if status & 0x0800:
-                protection_reasons.append("CHG_OC")  # Charge Over Current
-            if status & 0x1000:
-                protection_reasons.append("DSG_OC")  # Discharge Over Current
-            if status & 0x2000:
-                protection_reasons.append("SCD")    # Short Circuit
-            if status & 0x4000:
-                protection_reasons.append("AFE")    # AFE Error
-
-            if protection_reasons:
+            is_charging = bool(status & STATUS_CHARGING)
+            is_discharging = bool(status & STATUS_DISCHARGING)
+            # Only check protection if not charging/discharging
+            if not (is_charging or is_discharging):
+                if status & 0x0008:
+                    protection_reasons.append("COV")
+                if status & 0x0010:
+                    protection_reasons.append("CUV")
+                if status & 0x0020:
+                    protection_reasons.append("POV")
+                if status & 0x0040:
+                    protection_reasons.append("PUV")
+                if status & 0x0080:
+                    protection_reasons.append("CHG_OT")
+                if status & 0x0100:
+                    protection_reasons.append("CHG_UT")
+                if status & 0x0200:
+                    protection_reasons.append("DSG_OT")
+                if status & 0x0400:
+                    protection_reasons.append("DSG_UT")
+                if status & 0x0800:
+                    protection_reasons.append("CHG_OC")
+                if status & 0x1000:
+                    protection_reasons.append("DSG_OC")
+                if status & 0x2000:
+                    protection_reasons.append("SCD")
+                if status & 0x4000:
+                    protection_reasons.append("AFE")
+            # If SoC is 100 and any protect bits, treat as protect
+            if soc == 100 and protection_reasons:
                 data["state"] = "protect"
                 data["protect_reason"] = ",".join(protection_reasons)
-            elif status & STATUS_CHARGING:
+            elif is_charging or data["current"] > 0.1:
                 data["state"] = "charging"
-            elif status & STATUS_DISCHARGING:
+            elif is_discharging or data["current"] < -0.1:
                 data["state"] = "discharging"
+            elif protection_reasons:
+                data["state"] = "protect"
+                data["protect_reason"] = ",".join(protection_reasons)
             else:
                 data["state"] = "idle"
             
-            _LOGGER.debug("Parsed data: %s", data)
+            _LOGGER.debug(f"Parsed values: voltage={data['total_voltage']}V, current={data['current']}A, soc={soc}, state={data['state']}, pcb_temp={data['pcb_temp']}, cell_temp_1={data['cell_temp_1']}, cell_temp_2={data['cell_temp_2']}")
             return data
             
     except Exception as err:
