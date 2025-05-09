@@ -257,11 +257,12 @@ def parse_battery_data(response: bytes, device_name: str = None, device_address:
                 data["pcb_temp"] = round(pcb_temp_c * 9/5 + 32, 1) if pcb_temp_c is not None else None
                 data["cell_temp_1"] = round(cell_temp_1_c * 9/5 + 32, 1) if cell_temp_1_c is not None else None
                 data["cell_temp_2"] = round(cell_temp_2_c * 9/5 + 32, 1) if cell_temp_2_c is not None else None
+                data["temp_unit"] = "°F"
             else:
                 data["pcb_temp"] = round(pcb_temp_c, 1) if pcb_temp_c is not None else None
                 data["cell_temp_1"] = round(cell_temp_1_c, 1) if cell_temp_1_c is not None else None
                 data["cell_temp_2"] = round(cell_temp_2_c, 1) if cell_temp_2_c is not None else None
-            data["temp_unit"] = temp_unit.upper()
+                data["temp_unit"] = "°C"
 
             # Battery percentage (SoC) from marker 0x0898
             soc = None
