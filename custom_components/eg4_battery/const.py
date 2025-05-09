@@ -10,7 +10,7 @@ NOTIFY_CHARACTERISTIC_UUID = "00001002-0000-1000-8000-00805f9b34fb"
 REGISTER_TOTAL_VOLTAGE = 0    # Total voltage (÷100)
 REGISTER_CURRENT = 1          # Current (÷100, signed)
 REGISTER_CELL_VOLTAGE = 2     # Cell voltages start (÷1000)
-REGISTER_TEMPERATURE = 19     # Temperature values start (raw °C)
+REGISTER_TEMPERATURE = 18     # Temperature values start (raw °C)
 REGISTER_STATUS = 24         # Status bits
 REGISTER_SOC = 25           # State of charge (%)
 
