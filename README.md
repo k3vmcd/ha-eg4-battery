@@ -4,7 +4,7 @@ Home Assistant Integration for the EG4 Battery
 
 ## Description
 
-This Home Assistant integration allows you to monitor and control your EG4 battery system. Get real-time data about your battery's state, including charge levels, power flow, and system status.
+This Home Assistant integration allows you to monitor and control your EG4 battery system via Bluetooth. Get real-time data about your battery's state, including charge levels, power flow, and system status.
 
 ## Compatibility
 
@@ -49,12 +49,14 @@ Other EG4 battery models may work but are not officially supported. Support for 
 1. Go to Settings -> Devices & Services
 2. Click "Add Integration"
 3. Search for "EG4 Battery"
-4. Follow the configuration steps to connect to your battery system
+4. The integration will automatically discover nearby EG4 batteries via Bluetooth
+5. Select your battery from the list and follow the configuration steps
 
 ## Requirements
 
 - Home Assistant 2023.11.0 or newer
-- An EG4 battery system connected to your local network
+- An EG4 battery system with Bluetooth connectivity
+- Bluetooth adapter on your Home Assistant device
 
 ## Support
 
