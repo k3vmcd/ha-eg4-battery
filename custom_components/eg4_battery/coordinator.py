@@ -1,11 +1,15 @@
 """Coordinator for EG4 Battery BLE data."""
-from datetime import timedelta
+from datetime import datetime, timedelta
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 from bleak import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from .const import (
+    DEFAULT_BATTERY_CAPACITY_KWH,
+    DOMAIN,
     SERVICE_UUID,
     WRITE_CHARACTERISTIC_UUID,
     NOTIFY_CHARACTERISTIC_UUID,
@@ -26,14 +30,21 @@ from .const import (
 import logging
 import asyncio
 from typing import Any
-import struct
 
 _LOGGER = logging.getLogger(__name__)
 
 class Eg4BatteryCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch EG4 battery BLE data."""
     
-    def __init__(self, hass: HomeAssistant, device_address: str, device_name: str, temp_unit: str = "C", ble_name: str = None):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_address: str,
+        device_name: str,
+        temp_unit: str = "C",
+        ble_name: str | None = None,
+        battery_capacity_kwh: float | None = None,
+    ):
         """Initialize the coordinator."""
         super().__init__(
             hass,
@@ -45,15 +56,50 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
         self.device_name = device_name  # User's preferred name
         self.ble_name = ble_name  # Actual BLE name
         self.temp_unit = temp_unit.upper()  # "C" or "F"
+        try:
+            capacity = float(battery_capacity_kwh)
+        except (TypeError, ValueError):
+            capacity = DEFAULT_BATTERY_CAPACITY_KWH
+        self.battery_capacity_kwh = max(capacity, 0.1)
         self.data = {}
         self._notification_event = asyncio.Event()
         self._latest_data = None
         self._response_buffer = bytearray()
         self._expected_response_length = None
+        self._energy_store: Store | None = None
+        self._energy_stats: dict[str, Any] = {
+            "stored_energy_kwh": None,
+            "charged_total_kwh": 0.0,
+            "discharged_total_kwh": 0.0,
+            "last_ts": None,
+        }
+        self._last_energy_persist: datetime | None = None
     
     def set_temp_unit(self, unit: str):
         """Set the temperature unit ('C' or 'F')."""
         self.temp_unit = unit.upper()
+
+    async def async_initialize_storage(self) -> None:
+        """Prepare persistent storage for energy statistics."""
+        if self._energy_store is not None:
+            return
+        safe_address = self.device_address.replace(":", "").lower()
+        self._energy_store = Store(
+            self.hass,
+            1,
+            f"{DOMAIN}_{safe_address}_energy",
+        )
+        stored = await self._energy_store.async_load()
+        if stored:
+            self._energy_stats.update(stored)
+        for key, default in (
+            ("stored_energy_kwh", None),
+            ("charged_total_kwh", 0.0),
+            ("discharged_total_kwh", 0.0),
+            ("last_ts", None),
+        ):
+            self._energy_stats.setdefault(key, default)
+        self._last_energy_persist = None
 
     def notification_handler(self, sender: int, data: bytearray) -> None:
         """Handle incoming BLE notifications and assemble complete Modbus frames."""
@@ -171,6 +217,83 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Failed to setup notifications: %s", err)
             return False
 
+    async def _async_update_energy_statistics(self, data: dict[str, Any]) -> None:
+        """Update derived energy metrics for Energy Dashboard support."""
+        if self._energy_store is None:
+            await self.async_initialize_storage()
+
+        now = dt_util.utcnow()
+        force_persist = False
+
+        soc = data.get("battery_pct")
+        if soc is not None:
+            stored_energy = round((soc / 100.0) * self.battery_capacity_kwh, 3)
+            data["stored_energy_kwh"] = stored_energy
+            self._energy_stats["stored_energy_kwh"] = stored_energy
+        else:
+            data["stored_energy_kwh"] = None
+
+        voltage = data.get("total_voltage")
+        current = data.get("current")
+        if voltage is None or current is None:
+            data["charge_power_kw"] = None
+            data["discharge_power_kw"] = None
+            data["charge_energy_total_kwh"] = round(
+                self._energy_stats.get("charged_total_kwh", 0.0), 3
+            )
+            data["discharge_energy_total_kwh"] = round(
+                self._energy_stats.get("discharged_total_kwh", 0.0), 3
+            )
+            self._energy_stats["last_ts"] = now.isoformat()
+            await self._async_maybe_persist_energy(now, False)
+            return
+
+        power_kw = (voltage * current) / 1000.0
+        data["charge_power_kw"] = round(max(power_kw, 0.0), 3)
+        data["discharge_power_kw"] = round(max(-power_kw, 0.0), 3)
+
+        last_ts = self._energy_stats.get("last_ts")
+        last_dt = dt_util.parse_datetime(last_ts) if last_ts else None
+        delta_hours = 0.0
+        if last_dt is not None:
+            delta = (now - last_dt).total_seconds() / 3600.0
+            if delta > 0:
+                delta_hours = delta
+
+        energy_delta = 0.0
+        if delta_hours > 0 and abs(power_kw) > 0.0001:
+            energy_delta = power_kw * delta_hours
+            if energy_delta > 0:
+                self._energy_stats["charged_total_kwh"] += energy_delta
+            else:
+                self._energy_stats["discharged_total_kwh"] += abs(energy_delta)
+            if abs(energy_delta) >= 0.03:
+                force_persist = True
+
+        data["charge_energy_total_kwh"] = round(
+            self._energy_stats.get("charged_total_kwh", 0.0), 3
+        )
+        data["discharge_energy_total_kwh"] = round(
+            self._energy_stats.get("discharged_total_kwh", 0.0), 3
+        )
+        self._energy_stats["last_ts"] = now.isoformat()
+        await self._async_maybe_persist_energy(now, force_persist)
+
+    async def _async_maybe_persist_energy(self, now: datetime, force: bool) -> None:
+        """Persist energy stats periodically to survive restarts."""
+        if self._energy_store is None:
+            return
+        if not force and self._last_energy_persist is not None:
+            delta = (now - self._last_energy_persist).total_seconds()
+            if delta < 60:
+                return
+        try:
+            await self._energy_store.async_save(self._energy_stats)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.warning("Failed to persist energy statistics: %s", err, exc_info=True)
+            return
+        self._last_energy_persist = now
+
     def _calculate_crc16(self, data: bytes) -> int:
         """Calculate Modbus RTU CRC16."""
         crc = 0xFFFF
@@ -240,12 +363,20 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                             _LOGGER.debug("Waiting for notification response...")
                             await self._notification_event.wait()
                             if self._latest_data:
-                                self.data = parse_battery_data(
+                                parsed = parse_battery_data(
                                     self._latest_data,
                                     self.device_name,
                                     self.device_address,
                                     self.temp_unit
                                 )
+                                try:
+                                    await self._async_update_energy_statistics(parsed)
+                                except Exception as err:  # pragma: no cover - defensive
+                                    _LOGGER.warning(
+                                        "Energy statistics update failed: %s", err,
+                                        exc_info=True,
+                                    )
+                                self.data = parsed
                                 return self.data
                             _LOGGER.error("No data received after notification")
                     except asyncio.TimeoutError:
@@ -267,6 +398,21 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                         _LOGGER.warning("Error disconnecting: %s", err)
                     client = None
         
+        # If we have cached data, log the error but return cached values to keep entities available
+        # This is critical for BLE devices which frequently have connection issues
+        if self.data:
+            _LOGGER.warning(
+                "Failed to update after 3 attempts: %s. Using cached data to keep entities available.",
+                last_error
+            )
+            # Update energy statistics even with stale data to maintain totals
+            try:
+                await self._async_update_energy_statistics(self.data)
+            except Exception as err:
+                _LOGGER.debug("Could not update energy stats with cached data: %s", err)
+            return self.data
+        
+        # Only raise UpdateFailed if we have no data at all (first connection)
         raise UpdateFailed(f"Failed after 3 attempts: {last_error}")
 
 def parse_battery_data(response: bytes, device_name: str = None, device_address: str = None, temp_unit: str = "C") -> dict:

@@ -9,6 +9,8 @@ from homeassistant.const import (
     UnitOfTemperature,
     UnitOfElectricPotential,
     UnitOfElectricCurrent,
+    UnitOfEnergy,
+    UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -35,6 +37,51 @@ async def async_setup_entry(
         Eg4BatterySensor(coordinator, "pcb_temp", "PCB Temperature", None, SensorDeviceClass.TEMPERATURE),
         Eg4BatterySensor(coordinator, "cell_temp_1", "Cell Temperature 1", None, SensorDeviceClass.TEMPERATURE),
         Eg4BatterySensor(coordinator, "cell_temp_2", "Cell Temperature 2", None, SensorDeviceClass.TEMPERATURE),
+        Eg4BatterySensor(
+            coordinator,
+            "stored_energy_kwh",
+            "Stored Energy",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            SensorDeviceClass.ENERGY,
+            None,
+            keep_available_when_stale=True,
+        ),
+        Eg4BatterySensor(
+            coordinator,
+            "charge_energy_total_kwh",
+            "Energy Charged",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            SensorDeviceClass.ENERGY,
+            SensorStateClass.TOTAL_INCREASING,
+            keep_available_when_stale=True,
+        ),
+        Eg4BatterySensor(
+            coordinator,
+            "discharge_energy_total_kwh",
+            "Energy Discharged",
+            UnitOfEnergy.KILO_WATT_HOUR,
+            SensorDeviceClass.ENERGY,
+            SensorStateClass.TOTAL_INCREASING,
+            keep_available_when_stale=True,
+        ),
+        Eg4BatterySensor(
+            coordinator,
+            "charge_power_kw",
+            "Charge Power",
+            UnitOfPower.KILO_WATT,
+            SensorDeviceClass.POWER,
+            SensorStateClass.MEASUREMENT,
+            keep_available_when_stale=True,
+        ),
+        Eg4BatterySensor(
+            coordinator,
+            "discharge_power_kw",
+            "Discharge Power",
+            UnitOfPower.KILO_WATT,
+            SensorDeviceClass.POWER,
+            SensorStateClass.MEASUREMENT,
+            keep_available_when_stale=True,
+        ),
     ]
 
     # Add cell voltage sensors
@@ -68,6 +115,8 @@ class Eg4BatterySensor(CoordinatorEntity, SensorEntity):
         name: str,
         unit: str | None,
         device_class: str | None,
+        state_class: SensorStateClass | None = None,
+        keep_available_when_stale: bool = False,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
@@ -76,9 +125,14 @@ class Eg4BatterySensor(CoordinatorEntity, SensorEntity):
         self._attr_native_unit_of_measurement = unit
         self._attr_device_class = device_class
         self._attr_unique_id = f"{coordinator.device_address}_{key}"
-        self._attr_state_class = (
-            SensorStateClass.MEASUREMENT if device_class != None else None
-        )
+        self._attr_state_class = state_class
+        self._keep_available_when_stale = keep_available_when_stale
+        if (
+            self._attr_state_class is None
+            and device_class is not None
+            and device_class != SensorDeviceClass.ENERGY
+        ):
+            self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -107,3 +161,24 @@ class Eg4BatterySensor(CoordinatorEntity, SensorEntity):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get(self._key)
+
+    @property
+    def available(self) -> bool:
+        """Return availability based on coordinator data.
+        
+        Since the coordinator returns cached data on connection failures
+        (instead of raising UpdateFailed), standard CoordinatorEntity
+        availability logic works correctly. We only need special handling
+        to keep energy sensors available when their value is temporarily None.
+        """
+        # Standard availability check - works because coordinator doesn't fail when it has cached data
+        if not super().available:
+            return False
+            
+        # Additional check: energy sensors stay available even if their current value is None
+        # This prevents dashboard gaps when values are temporarily missing from updates
+        if self._keep_available_when_stale and self.coordinator.data is not None:
+            return True
+            
+        # For other sensors, require a non-None value
+        return self.coordinator.data is not None and self.coordinator.data.get(self._key) is not None

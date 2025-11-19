@@ -20,6 +20,7 @@ Other EG4 battery models may work but are not officially supported. Support for 
 - System status and health information
 - Temperature monitoring
 - Voltage and current readings
+- Energy Dashboard-ready stored energy and charge/discharge totals
 
 ## Installation
 
@@ -51,6 +52,18 @@ Other EG4 battery models may work but are not officially supported. Support for 
 3. Search for "EG4 Battery"
 4. The integration will automatically discover nearby EG4 batteries via Bluetooth
 5. Select your battery from the list and follow the configuration steps
+
+### Battery Capacity & Energy Dashboard
+
+- During setup you can provide your battery's usable capacity (default 5.12 kWh). This value is used to expose:
+   - `Stored Energy` (kWh measurement)
+   - `Energy Charged` (total_increasing kWh)
+   - `Energy Discharged` (total_increasing kWh)
+- These sensors satisfy Home Assistant's Energy Dashboard requirements for battery storage. After the first data refresh, navigate to **Settings → Dashboards → Energy** and select:
+   - `Energy Charged` as *Energy going into the battery*
+   - `Energy Discharged` as *Energy going out of the battery*
+   - `Stored Energy` (optional) for the *Battery State of Charge* graph
+- To update the capacity later, open the integration's *Options* panel from **Devices & Services** and adjust the value; the integration will reload automatically.
 
 ## Requirements
 
