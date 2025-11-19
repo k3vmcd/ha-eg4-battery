@@ -1,9 +1,11 @@
 """Coordinator for EG4 Battery BLE data."""
 from datetime import timedelta
+from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.exceptions import HomeAssistantError
-from bleak import BleakClient, BleakError
+from bleak import BleakError
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from .const import (
     SERVICE_UUID,
     WRITE_CHARACTERISTIC_UUID,
@@ -76,13 +78,30 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                 _LOGGER.error("Invalid response length: got %d, expected %d", 
                             len(data), expected_length)
 
+    async def _async_fetch_services(self, client):
+        """Return GATT services for the connected client with HA compatibility."""
+        if hasattr(client, "get_services"):
+            try:
+                services = await client.get_services()
+                if services is not None:
+                    return services
+            except AttributeError:
+                # Older HA clients may not implement get_services
+                pass
+        services = getattr(client, "services", None)
+        if services is None:
+            # Give bleak a brief moment to populate services cache
+            await asyncio.sleep(0.5)
+            services = getattr(client, "services", None)
+        return services or []
+
     async def _find_characteristics(self, client):
         """Find required characteristics with retry."""
         _LOGGER.debug("Discovering services and characteristics")
+        write_char = None
+        notify_char = None
         try:
-            # Wait for service discovery
-            await asyncio.sleep(1)
-            services = client.services
+            services = await self._async_fetch_services(client)
             for service in services:
                 _LOGGER.debug("Found service: %s", service.uuid)
                 if service.uuid.lower() == SERVICE_UUID.lower():
@@ -141,25 +160,38 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
         for attempt in range(3):
             try:
                 _LOGGER.debug("Connection attempt %d/3", attempt + 1)
-                client = BleakClient(self.device_address, timeout=20)
-                
+
+                ble_device = bluetooth.async_ble_device_from_address(
+                    self.hass,
+                    self.device_address,
+                    connectable=True,
+                )
+                if not ble_device:
+                    raise HomeAssistantError("Bluetooth device not available")
+
+                client = await establish_connection(
+                    BleakClientWithServiceCache,
+                    ble_device,
+                    ble_device.name or self.device_name or self.device_address,
+                    max_attempts=3,
+                )
+
+                if not client.is_connected:
+                    raise BleakError("Failed to establish connection")
+
                 # Clear any previous state
                 self._notification_event.clear()
                 self._latest_data = None
-                
-                # Connect with increased timeout
-                _LOGGER.debug("Connecting to device...")
-                await asyncio.wait_for(client.connect(), timeout=10.0)
-                await asyncio.sleep(1)  # Allow connection to stabilize
-                
-                if not client.is_connected:
-                    raise BleakError("Failed to establish connection")
+
+                # Allow connection to stabilize
+                await asyncio.sleep(1)
                 
                 # Find characteristics
                 write_char, notify_char = await self._find_characteristics(client)
                 if not write_char or not notify_char:
+                    services = await self._async_fetch_services(client)
                     _LOGGER.error("Could not find characteristics - Found services: %s",
-                                [s.uuid for s in client.services])
+                                [s.uuid for s in services])
                     raise BleakError("Required characteristics not found")
                 
                 # Enable notifications and wait for data
@@ -194,6 +226,7 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                             await client.disconnect()
                     except Exception as err:
                         _LOGGER.warning("Error disconnecting: %s", err)
+                    client = None
         
         raise HomeAssistantError(f"Failed after 3 attempts: {last_error}")
 
