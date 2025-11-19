@@ -2,8 +2,7 @@
 from datetime import timedelta
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from bleak import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from .const import (
@@ -49,34 +48,66 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
         self.data = {}
         self._notification_event = asyncio.Event()
         self._latest_data = None
+        self._response_buffer = bytearray()
+        self._expected_response_length = None
     
     def set_temp_unit(self, unit: str):
         """Set the temperature unit ('C' or 'F')."""
         self.temp_unit = unit.upper()
 
     def notification_handler(self, sender: int, data: bytearray) -> None:
-        """Handle incoming notifications."""
-        _LOGGER.debug("Received notification (%d bytes): %s", len(data), data.hex())
-        # For Modbus RTU responses:
-        # Byte 0: Slave address (0x01)
-        # Byte 1: Function code (0x03)
-        # Byte 2: Number of data bytes to follow
-        # Bytes 3-N: Data bytes
-        # Last 2 bytes: CRC16
-        if len(data) >= 3 and data[0] == 0x01 and data[1] == 0x03:
-            expected_length = data[2] + 5  # Header (3) + Data (N) + CRC (2)
-            if len(data) == expected_length:
-                # Verify CRC
-                received_crc = (data[-1] << 8) | data[-2]
-                calculated_crc = self._calculate_crc16(data[:-2])
-                if received_crc == calculated_crc:
-                    self._latest_data = data
-                    self._notification_event.set()
-                else:
-                    _LOGGER.error("CRC check failed")
-            else:
-                _LOGGER.error("Invalid response length: got %d, expected %d", 
-                            len(data), expected_length)
+        """Handle incoming BLE notifications and assemble complete Modbus frames."""
+        if not data:
+            return
+
+        _LOGGER.debug("Received notification chunk (%d bytes): %s", len(data), data.hex())
+        self._response_buffer.extend(data)
+        self._process_response_buffer()
+
+    def _process_response_buffer(self) -> None:
+        """Process buffered notification data until a complete frame is available."""
+        while True:
+            if self._expected_response_length is None:
+                if len(self._response_buffer) < 3:
+                    return
+                if self._response_buffer[0] != 0x01 or self._response_buffer[1] != 0x03:
+                    _LOGGER.warning(
+                        "Dropping notification due to unexpected header: %s",
+                        self._response_buffer.hex(),
+                    )
+                    self._response_buffer.clear()
+                    return
+                self._expected_response_length = self._response_buffer[2] + 5
+                _LOGGER.debug(
+                    "Expecting %d-byte response from notification stream",
+                    self._expected_response_length,
+                )
+
+            if len(self._response_buffer) < self._expected_response_length:
+                return
+
+            frame = bytes(self._response_buffer[: self._expected_response_length])
+            self._response_buffer = self._response_buffer[self._expected_response_length :]
+            self._expected_response_length = None
+            self._handle_full_frame(frame)
+            if not self._response_buffer:
+                return
+
+    def _handle_full_frame(self, frame: bytes) -> None:
+        """Validate and publish a complete Modbus frame."""
+        # Verify CRC
+        if len(frame) < 5:
+            _LOGGER.warning("Discarding short frame (%d bytes)", len(frame))
+            return
+
+        received_crc = (frame[-1] << 8) | frame[-2]
+        calculated_crc = self._calculate_crc16(frame[:-2])
+        if received_crc != calculated_crc:
+            _LOGGER.warning("CRC check failed for frame: %s", frame.hex())
+            return
+
+        self._latest_data = frame
+        self._notification_event.set()
 
     async def _async_fetch_services(self, client):
         """Return GATT services for the connected client with HA compatibility."""
@@ -167,7 +198,13 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                     connectable=True,
                 )
                 if not ble_device:
-                    raise HomeAssistantError("Bluetooth device not available")
+                    last_error = "Bluetooth device not available"
+                    _LOGGER.debug(
+                        "BLE device %s not currently available; retrying",
+                        self.device_address,
+                    )
+                    await asyncio.sleep((attempt + 1) * 2)
+                    continue
 
                 client = await establish_connection(
                     BleakClientWithServiceCache,
@@ -182,6 +219,8 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                 # Clear any previous state
                 self._notification_event.clear()
                 self._latest_data = None
+                self._response_buffer.clear()
+                self._expected_response_length = None
 
                 # Allow connection to stabilize
                 await asyncio.sleep(1)
@@ -228,7 +267,7 @@ class Eg4BatteryCoordinator(DataUpdateCoordinator):
                         _LOGGER.warning("Error disconnecting: %s", err)
                     client = None
         
-        raise HomeAssistantError(f"Failed after 3 attempts: {last_error}")
+        raise UpdateFailed(f"Failed after 3 attempts: {last_error}")
 
 def parse_battery_data(response: bytes, device_name: str = None, device_address: str = None, temp_unit: str = "C") -> dict:
     """Parse raw BLE data into a dictionary."""
