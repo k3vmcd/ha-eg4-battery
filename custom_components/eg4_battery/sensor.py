@@ -4,6 +4,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+from datetime import datetime, timedelta
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfTemperature,
@@ -44,8 +45,7 @@ async def async_setup_entry(
             UnitOfEnergy.KILO_WATT_HOUR,
             SensorDeviceClass.ENERGY,
             SensorStateClass.MEASUREMENT,
-            None,
-            keep_available_when_stale=True,
+            stale_grace_seconds=120,
         ),
         Eg4BatterySensor(
             coordinator,
@@ -54,7 +54,7 @@ async def async_setup_entry(
             UnitOfEnergy.KILO_WATT_HOUR,
             SensorDeviceClass.ENERGY,
             SensorStateClass.TOTAL_INCREASING,
-            keep_available_when_stale=True,
+            stale_grace_seconds=120,
         ),
         Eg4BatterySensor(
             coordinator,
@@ -63,7 +63,7 @@ async def async_setup_entry(
             UnitOfEnergy.KILO_WATT_HOUR,
             SensorDeviceClass.ENERGY,
             SensorStateClass.TOTAL_INCREASING,
-            keep_available_when_stale=True,
+            stale_grace_seconds=120,
         ),
         Eg4BatterySensor(
             coordinator,
@@ -72,7 +72,7 @@ async def async_setup_entry(
             UnitOfPower.KILO_WATT,
             SensorDeviceClass.POWER,
             SensorStateClass.MEASUREMENT,
-            keep_available_when_stale=True,
+            stale_grace_seconds=120,
         ),
         Eg4BatterySensor(
             coordinator,
@@ -81,7 +81,7 @@ async def async_setup_entry(
             UnitOfPower.KILO_WATT,
             SensorDeviceClass.POWER,
             SensorStateClass.MEASUREMENT,
-            keep_available_when_stale=True,
+            stale_grace_seconds=120,
         ),
     ]
 
@@ -119,6 +119,7 @@ class Eg4BatterySensor(CoordinatorEntity, SensorEntity):
         device_class: str | None,
         state_class: SensorStateClass | None = None,
         keep_available_when_stale: bool = False,
+        stale_grace_seconds: int = 0,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
@@ -129,6 +130,8 @@ class Eg4BatterySensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{coordinator.device_address}_{key}"
         self._attr_state_class = state_class
         self._keep_available_when_stale = keep_available_when_stale
+        self._stale_grace_seconds = stale_grace_seconds
+        self._last_valid_value_time: datetime | None = None
         if (
             self._attr_state_class is None
             and device_class is not None
@@ -162,25 +165,39 @@ class Eg4BatterySensor(CoordinatorEntity, SensorEntity):
         """Return the state of the sensor."""
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.get(self._key)
+        value = self.coordinator.data.get(self._key)
+        if value is not None:
+            self._last_valid_value_time = datetime.utcnow()
+        return value
 
     @property
     def available(self) -> bool:
-        """Return availability based on coordinator data.
-        
-        Since the coordinator returns cached data on connection failures
-        (instead of raising UpdateFailed), standard CoordinatorEntity
-        availability logic works correctly. We only need special handling
-        to keep energy sensors available when their value is temporarily None.
+        """Return availability considering stale grace window.
+
+        Logic precedence:
+        1. Base coordinator availability must be True.
+        2. If keep_available_when_stale is True and coordinator has data -> available.
+        3. If we have a current non-None value -> available.
+        4. If stale_grace_seconds > 0 and last valid value was within grace -> available.
+        5. Else unavailable.
         """
-        # Standard availability check - works because coordinator doesn't fail when it has cached data
         if not super().available:
             return False
-            
-        # Additional check: energy sensors stay available even if their current value is None
-        # This prevents dashboard gaps when values are temporarily missing from updates
-        if self._keep_available_when_stale and self.coordinator.data is not None:
+
+        if self.coordinator.data is None:
+            return False
+
+        current_value = self.coordinator.data.get(self._key)
+        if self._keep_available_when_stale:
             return True
-            
-        # For other sensors, require a non-None value
-        return self.coordinator.data is not None and self.coordinator.data.get(self._key) is not None
+        if current_value is not None:
+            return True
+
+        if (
+            self._stale_grace_seconds > 0
+            and self._last_valid_value_time is not None
+            and datetime.utcnow() - self._last_valid_value_time <= timedelta(seconds=self._stale_grace_seconds)
+        ):
+            return True
+
+        return False
