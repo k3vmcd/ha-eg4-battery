@@ -43,6 +43,7 @@ async def async_setup_entry(
             "Stored Energy",
             UnitOfEnergy.KILO_WATT_HOUR,
             SensorDeviceClass.ENERGY,
+            SensorStateClass.MEASUREMENT,
             None,
             keep_available_when_stale=True,
         ),
@@ -93,14 +94,15 @@ async def async_setup_entry(
                 f"Cell {i+1} Voltage",
                 UnitOfElectricPotential.VOLT,
                 SensorDeviceClass.VOLTAGE,
+                SensorStateClass.MEASUREMENT,
             )
         )
 
     # Add min/max/diff voltage sensors
     sensors.extend([
-        Eg4BatterySensor(coordinator, "cell_voltage_min", "Cell Voltage Min", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE),
-        Eg4BatterySensor(coordinator, "cell_voltage_max", "Cell Voltage Max", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE),
-        Eg4BatterySensor(coordinator, "cell_voltage_diff", "Cell Voltage Difference", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE),
+        Eg4BatterySensor(coordinator, "cell_voltage_min", "Cell Voltage Min", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+        Eg4BatterySensor(coordinator, "cell_voltage_max", "Cell Voltage Max", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+        Eg4BatterySensor(coordinator, "cell_voltage_diff", "Cell Voltage Difference", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
     ])
 
     async_add_entities(sensors)
