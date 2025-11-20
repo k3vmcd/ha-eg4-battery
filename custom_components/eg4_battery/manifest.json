@@ -15,5 +15,5 @@
     "requirements": [
         "bleak>=0.21.0"
     ],
-    "version": "0.2.1"
+    "version": "0.2.2"
 }
